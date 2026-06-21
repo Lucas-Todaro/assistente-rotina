@@ -242,8 +242,7 @@
   display: grid;
   grid-template-columns: 50px minmax(0, 1fr);
   gap: 12px;
-  height: var(--entry-height);
-  min-height: 68px;
+  min-height: var(--entry-height);
   padding: 15px 12px 14px 14px;
   border-bottom: 1px solid var(--line);
   transition: background 160ms ease;
@@ -309,6 +308,7 @@
   font-size: 13px;
   font-weight: 500;
   text-transform: lowercase;
+  overflow-wrap: anywhere;
 }
 
 .week-day__empty {
@@ -493,8 +493,7 @@
 .agenda-item {
   display: grid;
   grid-template-columns: 48px 15px minmax(0, 1fr);
-  height: var(--agenda-height);
-  min-height: 92px;
+  min-height: var(--agenda-height);
   animation: item-enter 320ms ease both;
   animation-delay: calc(var(--item-index) * 32ms);
 }
