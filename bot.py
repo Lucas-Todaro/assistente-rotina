@@ -311,20 +311,30 @@ def classificar_faixa_do_dia(horario):
 
 
 def candidatos_de_sugestao(duracao_minutos_tarefa):
-    """Gera um candidato de horário por janela livre (o início de cada
-    janela), na ordem cronológica em que as janelas aparecem."""
+    """Gera todos os horários de início possíveis dentro das janelas
+    livres dos próximos dias, usando o mesmo princípio do fluxo manual:
+    o passo entre as opções é igual à própria duração da tarefa (ex:
+    tarefa de 1h -> opções de hora em hora dentro de cada janela)."""
     janelas = calcular_janelas_livres()
     candidatos = []
+    passo = timedelta(minutes=duracao_minutos_tarefa)
 
     for janela in janelas:
         if duracao_janela_minutos(janela) < duracao_minutos_tarefa:
             continue
-        candidatos.append({
-            "data": janela["data"],
-            "dia_semana": janela["dia_semana"],
-            "horario": janela["inicio"],
-            "faixa": classificar_faixa_do_dia(janela["inicio"]),
-        })
+
+        cursor_dt = datetime.combine(janela["data"], janela["inicio"])
+        fim_janela_dt = datetime.combine(janela["data"], janela["fim"])
+
+        while cursor_dt + passo <= fim_janela_dt:
+            horario = cursor_dt.time()
+            candidatos.append({
+                "data": janela["data"],
+                "dia_semana": janela["dia_semana"],
+                "horario": horario,
+                "faixa": classificar_faixa_do_dia(horario),
+            })
+            cursor_dt += passo
 
     return candidatos
 
