@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './supabaseClient'
+import {
+  dataDoDia,
+  dataEhHoje,
+  formatarDataISO,
+  horaParaMinutos,
+  inicioDaSemana,
+  montarBlocosPorDia,
+} from './schedule'
 import './App.css'
 
 const DIAS = [
@@ -17,28 +25,8 @@ function diaSemanaDeHoje() {
   return DIAS[indice].id
 }
 
-function inicioDaSemana(data = new Date()) {
-  const inicio = new Date(data)
-  const deslocamento = (inicio.getDay() + 6) % 7
-  inicio.setDate(inicio.getDate() - deslocamento)
-  inicio.setHours(0, 0, 0, 0)
-  return inicio
-}
-
-function dataDoDia(indice) {
-  const data = inicioDaSemana()
-  data.setDate(data.getDate() + indice)
-  return data
-}
-
 function formatarHora(hora) {
   return hora ? hora.slice(0, 5) : ''
-}
-
-function horaParaMinutos(hora) {
-  if (!hora) return 0
-  const [horas, minutos] = hora.split(':').map(Number)
-  return horas * 60 + minutos
 }
 
 function minutosDoBloco(bloco) {
@@ -67,9 +55,9 @@ function alturaVisualDaDuracao(minutos, contexto = 'desktop') {
   )
 }
 
-function formatarIntervaloSemana() {
-  const inicio = dataDoDia(0)
-  const fim = dataDoDia(6)
+function formatarIntervaloSemana(inicioSemana) {
+  const inicio = dataDoDia(inicioSemana, 0)
+  const fim = dataDoDia(inicioSemana, 6)
   const mesInicio = inicio
     .toLocaleDateString('pt-BR', { month: 'short' })
     .replace('.', '')
@@ -111,7 +99,28 @@ function IconeCalendario() {
   )
 }
 
-function SeletorDeDias({ diaAtivo, aoSelecionar, blocosPorDia }) {
+function NavegacaoSemana({ semanaAtual, aoVoltar, aoAvancar, aoIrParaHoje }) {
+  return (
+    <nav className="week-navigation" aria-label="Navegar entre semanas">
+      <button type="button" onClick={aoVoltar} aria-label="Semana anterior">
+        <span aria-hidden="true">←</span>
+      </button>
+      <button
+        className="week-navigation__today"
+        type="button"
+        onClick={aoIrParaHoje}
+        disabled={semanaAtual}
+      >
+        hoje
+      </button>
+      <button type="button" onClick={aoAvancar} aria-label="Próxima semana">
+        <span aria-hidden="true">→</span>
+      </button>
+    </nav>
+  )
+}
+
+function SeletorDeDias({ diaAtivo, aoSelecionar, blocosPorDia, inicioSemana }) {
   const referenciaAtiva = useRef(null)
 
   useEffect(() => {
@@ -123,13 +132,12 @@ function SeletorDeDias({ diaAtivo, aoSelecionar, blocosPorDia }) {
     })
   }, [diaAtivo])
 
-  const hoje = diaSemanaDeHoje()
-
   return (
     <nav className="day-selector" aria-label="Selecionar dia da semana">
       {DIAS.map((dia, indice) => {
         const ativo = dia.id === diaAtivo
-        const atual = dia.id === hoje
+        const data = dataDoDia(inicioSemana, indice)
+        const atual = dataEhHoje(data)
         const quantidade = blocosPorDia[dia.id]?.length || 0
 
         return (
@@ -143,7 +151,7 @@ function SeletorDeDias({ diaAtivo, aoSelecionar, blocosPorDia }) {
             ref={ativo ? referenciaAtiva : null}
           >
             <span className="day-tab__weekday">{dia.curto}</span>
-            <span className="day-tab__date">{String(dataDoDia(indice).getDate()).padStart(2, '0')}</span>
+            <span className="day-tab__date">{String(data.getDate()).padStart(2, '0')}</span>
             <span className="day-tab__meta">
               <span className="day-tab__dot" />
               {quantidade}
@@ -177,14 +185,13 @@ function ItemDaSemana({ bloco }) {
   )
 }
 
-function VisaoSemanal({ blocosPorDia }) {
-  const hoje = diaSemanaDeHoje()
-
+function VisaoSemanal({ blocosPorDia, inicioSemana }) {
   return (
     <div className="weekly-board">
       {DIAS.map((dia, indice) => {
         const blocos = blocosPorDia[dia.id]
-        const atual = dia.id === hoje
+        const data = dataDoDia(inicioSemana, indice)
+        const atual = dataEhHoje(data)
 
         return (
           <section className={`week-day${atual ? ' is-today' : ''}`} key={dia.id}>
@@ -193,7 +200,7 @@ function VisaoSemanal({ blocosPorDia }) {
                 <span>{dia.curto}</span>
                 {atual && <em>Hoje</em>}
               </div>
-              <strong>{String(dataDoDia(indice).getDate()).padStart(2, '0')}</strong>
+              <strong>{String(data.getDate()).padStart(2, '0')}</strong>
             </header>
 
             <div className="week-day__list">
@@ -210,10 +217,10 @@ function VisaoSemanal({ blocosPorDia }) {
   )
 }
 
-function AgendaDoDia({ dia, blocos }) {
+function AgendaDoDia({ dia, blocos, inicioSemana }) {
   const infoDia = DIAS.find((item) => item.id === dia)
   const indiceDia = DIAS.findIndex((item) => item.id === dia)
-  const data = dataDoDia(indiceDia)
+  const data = dataDoDia(inicioSemana, indiceDia)
   const totalMinutos = blocos.reduce((total, bloco) => total + minutosDoBloco(bloco), 0)
 
   return (
@@ -299,19 +306,16 @@ function EstadoCarregando() {
 
 export default function App() {
   const [diaAtivo, setDiaAtivo] = useState(diaSemanaDeHoje())
+  const [inicioSemanaSelecionada, setInicioSemanaSelecionada] = useState(() => inicioDaSemana())
   const [rotinaFixa, setRotinaFixa] = useState([])
   const [tarefas, setTarefas] = useState([])
   const [carregando, setCarregando] = useState(true)
 
   const carregarDados = useCallback(async () => {
-    const hoje = new Date().toISOString().split('T')[0]
-
     const [{ data: rotina }, { data: tarefasData }] = await Promise.all([
       supabase
         .from('rotina_fixa')
-        .select('*')
-        .or(`data_inicio.is.null,data_inicio.lte.${hoje}`)
-        .or(`data_fim.is.null,data_fim.gte.${hoje}`),
+        .select('*'),
       supabase
         .from('tarefas')
         .select('*')
@@ -344,51 +348,41 @@ export default function App() {
     }
   }, [carregarDados])
 
+  const datasDaSemana = useMemo(
+    () => DIAS.map((_, indice) => dataDoDia(inicioSemanaSelecionada, indice)),
+    [inicioSemanaSelecionada],
+  )
+
   const blocosPorDia = useMemo(() => {
-    const blocos = Object.fromEntries(DIAS.map((dia) => [dia.id, []]))
-
-    rotinaFixa.forEach((item) => {
-      if (!blocos[item.dia_semana]) return
-      blocos[item.dia_semana].push({
-        id: `fixo-${item.id}`,
-        tipo: 'fixo',
-        horario: item.horario_inicio,
-        horarioFim: item.horario_fim,
-        titulo: item.atividade,
-      })
+    return montarBlocosPorDia({
+      dias: DIAS,
+      datasDaSemana,
+      rotinaFixa,
+      tarefas,
     })
-
-    tarefas.forEach((item) => {
-      const dataTarefa = new Date(`${item.dia_sugerido}T00:00:00`)
-      const dia = DIAS[(dataTarefa.getDay() + 6) % 7]?.id
-      if (!dia) return
-
-      const inicioMin = horaParaMinutos(item.horario_sugerido)
-      const fimMin = inicioMin + (item.duracao_minutos || 30)
-      const horarioFim = `${String(Math.floor(fimMin / 60)).padStart(2, '0')}:${String(fimMin % 60).padStart(2, '0')}:00`
-
-      blocos[dia].push({
-        id: `tarefa-${item.id}`,
-        tipo: 'tarefa',
-        horario: item.horario_sugerido,
-        horarioFim,
-        duracaoMinutos: item.duracao_minutos,
-        titulo: item.descricao,
-      })
-    })
-
-    Object.values(blocos).forEach((lista) => {
-      lista.sort((a, b) => horaParaMinutos(a.horario) - horaParaMinutos(b.horario))
-    })
-
-    return blocos
-  }, [rotinaFixa, tarefas])
+  }, [datasDaSemana, rotinaFixa, tarefas])
 
   const todosOsBlocos = Object.values(blocosPorDia).flat()
   const totalMinutos = todosOsBlocos.reduce(
     (total, bloco) => total + minutosDoBloco(bloco),
     0,
   )
+  const semanaAtual =
+    formatarDataISO(inicioSemanaSelecionada) === formatarDataISO(inicioDaSemana())
+  const chaveSemana = formatarDataISO(inicioSemanaSelecionada)
+
+  function navegarSemana(quantidade) {
+    setInicioSemanaSelecionada((semana) => {
+      const novaSemana = new Date(semana)
+      novaSemana.setDate(novaSemana.getDate() + quantidade * 7)
+      return novaSemana
+    })
+  }
+
+  function voltarParaHoje() {
+    setInicioSemanaSelecionada(inicioDaSemana())
+    setDiaAtivo(diaSemanaDeHoje())
+  }
 
   return (
     <div className="app-shell">
@@ -403,16 +397,26 @@ export default function App() {
       <main className="workspace">
         <section className="planner" aria-label="Planejamento semanal">
           <header className="planner-panel__header">
-            <div>
-              <span className="eyebrow">semana atual</span>
-              <h1>planejamento semanal</h1>
+            <div className="planner-panel__title">
+              <span className="eyebrow">
+                {semanaAtual ? 'semana atual' : 'semana selecionada'}
+              </span>
+              <div className="planner-panel__title-row">
+                <h1>planejamento semanal</h1>
+                <NavegacaoSemana
+                  semanaAtual={semanaAtual}
+                  aoVoltar={() => navegarSemana(-1)}
+                  aoAvancar={() => navegarSemana(1)}
+                  aoIrParaHoje={voltarParaHoje}
+                />
+              </div>
             </div>
 
             <div className="planner-panel__info">
               <dl className="week-summary">
                 <div>
                   <dt>semana</dt>
-                  <dd>{formatarIntervaloSemana()}</dd>
+                  <dd aria-live="polite">{formatarIntervaloSemana(inicioSemanaSelecionada)}</dd>
                 </div>
                 <div>
                   <dt>blocos</dt>
@@ -440,10 +444,20 @@ export default function App() {
                   aoSelecionar={setDiaAtivo}
                   blocosPorDia={blocosPorDia}
                   diaAtivo={diaAtivo}
+                  inicioSemana={inicioSemanaSelecionada}
                 />
-                <AgendaDoDia blocos={blocosPorDia[diaAtivo]} dia={diaAtivo} />
+                <AgendaDoDia
+                  blocos={blocosPorDia[diaAtivo]}
+                  dia={diaAtivo}
+                  inicioSemana={inicioSemanaSelecionada}
+                  key={`${chaveSemana}-${diaAtivo}`}
+                />
               </div>
-              <VisaoSemanal blocosPorDia={blocosPorDia} />
+              <VisaoSemanal
+                blocosPorDia={blocosPorDia}
+                inicioSemana={inicioSemanaSelecionada}
+                key={chaveSemana}
+              />
             </>
           )}
         </section>
