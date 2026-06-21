@@ -216,7 +216,7 @@ def calcular_janelas_livres(dias_a_frente=7):
         if dia_semana_nome in DIAS_FIM_DE_SEMANA:
             inicio_dia = time(9, 0)
         else:
-            inicio_dia = time(6, 0)
+            inicio_dia = time(8, 0)
 
         fim_dia = time(23, 0)
 
