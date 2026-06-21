@@ -39,9 +39,18 @@ if variaveis_faltando:
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Estados da conversa
 AGUARDANDO_DURACAO = 1
+ESCOLHENDO_MODO_HORARIO = 2
+ESCOLHENDO_DIA = 3
+ESCOLHENDO_HORARIO = 4
+
 DIAS_SEMANA = ["segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo"]
 DIAS_FIM_DE_SEMANA = ["sabado", "domingo"]
+NOMES_DIA_CURTO = {
+    "segunda": "Seg", "terca": "Ter", "quarta": "Qua", "quinta": "Qui",
+    "sexta": "Sex", "sabado": "Sáb", "domingo": "Dom",
+}
 BASE_DIR = Path(__file__).resolve().parent
 EXEMPLOS_PATH = BASE_DIR / "category_examples.json"
 CACHE_EMBEDDINGS_PATH = BASE_DIR / "category_centers.json"
@@ -287,6 +296,47 @@ def sugerir_horario(duracao_minutos_tarefa):
             return janela
     return None
 
+
+def dias_com_janela_disponivel(duracao_minutos_tarefa):
+    """Retorna a lista de datas (sem repetição, em ordem) que têm pelo menos
+    uma janela livre grande o suficiente para a duração informada."""
+    janelas = calcular_janelas_livres()
+    dias_vistos = []
+    dias_unicos = set()
+
+    for janela in janelas:
+        if duracao_janela_minutos(janela) < duracao_minutos_tarefa:
+            continue
+        if janela["data"] not in dias_unicos:
+            dias_unicos.add(janela["data"])
+            dias_vistos.append((janela["data"], janela["dia_semana"]))
+
+    return dias_vistos
+
+
+def horarios_disponiveis_no_dia(data_escolhida, duracao_minutos_tarefa):
+    """Gera os horários de início possíveis para uma tarefa de uma certa duração,
+    dentro das janelas livres de um dia específico. O passo entre as opções é
+    igual à própria duração da tarefa (ex: tarefa de 30min -> opções de 30 em 30 min)."""
+    janelas_do_dia = [
+        janela for janela in calcular_janelas_livres()
+        if janela["data"] == data_escolhida
+        and duracao_janela_minutos(janela) >= duracao_minutos_tarefa
+    ]
+
+    horarios = []
+    passo = timedelta(minutes=duracao_minutos_tarefa)
+
+    for janela in janelas_do_dia:
+        cursor_dt = datetime.combine(janela["data"], janela["inicio"])
+        fim_janela_dt = datetime.combine(janela["data"], janela["fim"])
+
+        while cursor_dt + passo <= fim_janela_dt:
+            horarios.append(cursor_dt.time())
+            cursor_dt += passo
+
+    return horarios
+
 # ===== Handlers do Telegram =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Bot conectado! Me manda uma tarefa pra testar.")
@@ -319,19 +369,24 @@ async def receber_duracao(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     duracao_minutos = int(query.data)
+    context.user_data["duracao_minutos"] = duracao_minutos
+
+    teclado = [
+        [InlineKeyboardButton("🔮 Sugerir horário", callback_data="modo_sugerir")],
+        [InlineKeyboardButton("📅 Eu escolho o horário", callback_data="modo_escolher")],
+    ]
+    await query.edit_message_text(
+        f"Duração: {duracao_minutos} min\nComo você quer definir o horário?",
+        reply_markup=InlineKeyboardMarkup(teclado)
+    )
+    return ESCOLHENDO_MODO_HORARIO
+
+
+async def salvar_tarefa(context, dia_sugerido, horario_sugerido):
+    """Insere a tarefa no Supabase usando os dados acumulados em user_data."""
     descricao = context.user_data.get("descricao")
     categoria = context.user_data.get("categoria")
-
-    janela_sugerida = sugerir_horario(duracao_minutos)
-
-    if janela_sugerida:
-        dia_sugerido = janela_sugerida["data"]
-        horario_sugerido = janela_sugerida["inicio"]
-        texto_sugestao = f"\n\nSugestão: {janela_sugerida['dia_semana']} ({dia_sugerido.strftime('%d/%m')}) às {horario_sugerido.strftime('%H:%M')}"
-    else:
-        dia_sugerido = None
-        horario_sugerido = None
-        texto_sugestao = "\n\nNão encontrei uma janela livre nos próximos dias."
+    duracao_minutos = context.user_data.get("duracao_minutos")
 
     supabase.table("tarefas").insert({
         "descricao": descricao,
@@ -342,10 +397,125 @@ async def receber_duracao(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "horario_sugerido": horario_sugerido.strftime("%H:%M:%S") if horario_sugerido else None
     }).execute()
 
+    return descricao, categoria, duracao_minutos
+
+
+async def escolher_modo_horario(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    duracao_minutos = context.user_data.get("duracao_minutos")
+
+    if query.data == "modo_sugerir":
+        janela_sugerida = sugerir_horario(duracao_minutos)
+
+        if janela_sugerida:
+            dia_sugerido = janela_sugerida["data"]
+            horario_sugerido = janela_sugerida["inicio"]
+            texto_sugestao = (
+                f"\n\nSugestão: {janela_sugerida['dia_semana']} "
+                f"({dia_sugerido.strftime('%d/%m')}) às {horario_sugerido.strftime('%H:%M')}"
+            )
+        else:
+            dia_sugerido = None
+            horario_sugerido = None
+            texto_sugestao = "\n\nNão encontrei uma janela livre nos próximos dias."
+
+        descricao, categoria, duracao_minutos = await salvar_tarefa(
+            context, dia_sugerido, horario_sugerido
+        )
+
+        await query.edit_message_text(
+            f"Tarefa salva: {descricao}\nCategoria: {categoria}\n"
+            f"Duração: {duracao_minutos} min{texto_sugestao}"
+        )
+        return ConversationHandler.END
+
+    # query.data == "modo_escolher"
+    dias_disponiveis = dias_com_janela_disponivel(duracao_minutos)
+
+    if not dias_disponiveis:
+        await query.edit_message_text(
+            "Não encontrei nenhum dia com espaço suficiente para essa duração "
+            "nos próximos 7 dias. Tarefa não foi salva."
+        )
+        return ConversationHandler.END
+
+    botoes = []
+    linha = []
+    for data_disponivel, dia_semana_nome in dias_disponiveis:
+        rotulo = f"{NOMES_DIA_CURTO[dia_semana_nome]} {data_disponivel.strftime('%d/%m')}"
+        callback = f"dia_{data_disponivel.isoformat()}"
+        linha.append(InlineKeyboardButton(rotulo, callback_data=callback))
+        if len(linha) == 2:
+            botoes.append(linha)
+            linha = []
+    if linha:
+        botoes.append(linha)
+
     await query.edit_message_text(
-        f"Tarefa salva: {descricao}\nCategoria: {categoria}\nDuração: {duracao_minutos} min{texto_sugestao}"
+        "Escolha o dia:",
+        reply_markup=InlineKeyboardMarkup(botoes)
+    )
+    return ESCOLHENDO_DIA
+
+
+async def escolher_dia(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data_escolhida_str = query.data.removeprefix("dia_")
+    data_escolhida = datetime.strptime(data_escolhida_str, "%Y-%m-%d").date()
+    context.user_data["dia_escolhido"] = data_escolhida
+
+    duracao_minutos = context.user_data.get("duracao_minutos")
+    horarios = horarios_disponiveis_no_dia(data_escolhida, duracao_minutos)
+
+    if not horarios:
+        await query.edit_message_text(
+            "Esse dia não tem mais espaço suficiente para essa duração. "
+            "Tente novamente com /start."
+        )
+        return ConversationHandler.END
+
+    botoes = []
+    linha = []
+    for horario in horarios:
+        rotulo = horario.strftime("%H:%M")
+        callback = f"hora_{rotulo}"
+        linha.append(InlineKeyboardButton(rotulo, callback_data=callback))
+        if len(linha) == 3:
+            botoes.append(linha)
+            linha = []
+    if linha:
+        botoes.append(linha)
+
+    await query.edit_message_text(
+        f"Dia escolhido: {data_escolhida.strftime('%d/%m')}\nEscolha o horário:",
+        reply_markup=InlineKeyboardMarkup(botoes)
+    )
+    return ESCOLHENDO_HORARIO
+
+
+async def escolher_horario(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    horario_str = query.data.removeprefix("hora_")
+    horario_escolhido = datetime.strptime(horario_str, "%H:%M").time()
+    data_escolhida = context.user_data.get("dia_escolhido")
+
+    descricao, categoria, duracao_minutos = await salvar_tarefa(
+        context, data_escolhida, horario_escolhido
+    )
+
+    await query.edit_message_text(
+        f"Tarefa salva: {descricao}\nCategoria: {categoria}\n"
+        f"Duração: {duracao_minutos} min\n\n"
+        f"Agendada para {data_escolhida.strftime('%d/%m')} às {horario_escolhido.strftime('%H:%M')}"
     )
     return ConversationHandler.END
+
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Cancelado.")
@@ -360,7 +530,10 @@ def main():
     conv_handler = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND, nova_tarefa)],
         states={
-            AGUARDANDO_DURACAO: [CallbackQueryHandler(receber_duracao)]
+            AGUARDANDO_DURACAO: [CallbackQueryHandler(receber_duracao)],
+            ESCOLHENDO_MODO_HORARIO: [CallbackQueryHandler(escolher_modo_horario)],
+            ESCOLHENDO_DIA: [CallbackQueryHandler(escolher_dia)],
+            ESCOLHENDO_HORARIO: [CallbackQueryHandler(escolher_horario)],
         },
         fallbacks=[CommandHandler("cancelar", cancelar)]
     )
