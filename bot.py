@@ -44,6 +44,9 @@ AGUARDANDO_DURACAO = 1
 ESCOLHENDO_MODO_HORARIO = 2
 ESCOLHENDO_DIA = 3
 ESCOLHENDO_HORARIO = 4
+ESCOLHENDO_SUGESTAO = 5
+
+OPCOES_POR_PAGINA = 3
 
 DIAS_SEMANA = ["segunda", "terca", "quarta", "quinta", "sexta", "sabado", "domingo"]
 DIAS_FIM_DE_SEMANA = ["sabado", "domingo"]
@@ -297,6 +300,74 @@ def sugerir_horario(duracao_minutos_tarefa):
     return None
 
 
+def classificar_faixa_do_dia(horario):
+    """Classifica um horário em 'manha' (até 12h), 'tarde' (12h-18h)
+    ou 'noite' (a partir de 18h)."""
+    if horario < time(12, 0):
+        return "manha"
+    if horario < time(18, 0):
+        return "tarde"
+    return "noite"
+
+
+def candidatos_de_sugestao(duracao_minutos_tarefa):
+    """Gera um candidato de horário por janela livre (o início de cada
+    janela), na ordem cronológica em que as janelas aparecem."""
+    janelas = calcular_janelas_livres()
+    candidatos = []
+
+    for janela in janelas:
+        if duracao_janela_minutos(janela) < duracao_minutos_tarefa:
+            continue
+        candidatos.append({
+            "data": janela["data"],
+            "dia_semana": janela["dia_semana"],
+            "horario": janela["inicio"],
+            "faixa": classificar_faixa_do_dia(janela["inicio"]),
+        })
+
+    return candidatos
+
+
+def intercalar_por_faixa(todos_candidatos):
+    """Reordena os candidatos para intercalar manhã/tarde/noite (1 de cada
+    por vez, na ordem manhã -> tarde -> noite), preservando a ordem
+    cronológica dentro de cada faixa. Quando uma faixa se esgota, as
+    demais continuam intercalando entre si."""
+    por_faixa = {"manha": [], "tarde": [], "noite": []}
+    for candidato in todos_candidatos:
+        por_faixa[candidato["faixa"]].append(candidato)
+
+    intercalados = []
+    indices = {"manha": 0, "tarde": 0, "noite": 0}
+    total = len(todos_candidatos)
+
+    while len(intercalados) < total:
+        for faixa in ("manha", "tarde", "noite"):
+            i = indices[faixa]
+            if i < len(por_faixa[faixa]):
+                intercalados.append(por_faixa[faixa][i])
+                indices[faixa] += 1
+
+    return intercalados
+
+
+def gerar_opcoes_sugestao(duracao_minutos_tarefa, pagina=0):
+    """Retorna até OPCOES_POR_PAGINA candidatos de horário para a página
+    pedida (pagina=0 é a primeira tela), espalhando manhã/tarde/noite
+    sempre que possível, e um booleano indicando se há mais opções
+    disponíveis em páginas seguintes."""
+    todos_candidatos = candidatos_de_sugestao(duracao_minutos_tarefa)
+    intercalados = intercalar_por_faixa(todos_candidatos)
+
+    inicio = pagina * OPCOES_POR_PAGINA
+    fim = inicio + OPCOES_POR_PAGINA
+    opcoes = intercalados[inicio:fim]
+    tem_mais = fim < len(intercalados)
+
+    return opcoes, tem_mais
+
+
 def dias_com_janela_disponivel(duracao_minutos_tarefa):
     """Retorna a lista de datas (sem repetição, em ordem) que têm pelo menos
     uma janela livre grande o suficiente para a duração informada."""
@@ -400,6 +471,40 @@ async def salvar_tarefa(context, dia_sugerido, horario_sugerido):
     return descricao, categoria, duracao_minutos
 
 
+async def montar_tela_sugestao(query, context, pagina):
+    duracao_minutos = context.user_data.get("duracao_minutos")
+    opcoes, tem_mais = gerar_opcoes_sugestao(duracao_minutos, pagina)
+
+    context.user_data["pagina_sugestao"] = pagina
+    context.user_data["opcoes_sugestao"] = opcoes
+
+    if not opcoes:
+        if pagina == 0:
+            await query.edit_message_text(
+                "Não encontrei nenhuma janela livre nos próximos dias."
+            )
+            return ConversationHandler.END
+        # Não há mais opções novas nessa página; volta para a última válida.
+        return await montar_tela_sugestao(query, context, pagina - 1)
+
+    botoes = []
+    for indice, opcao in enumerate(opcoes):
+        rotulo = (
+            f"{NOMES_DIA_CURTO[opcao['dia_semana']]} {opcao['data'].strftime('%d/%m')} "
+            f"às {opcao['horario'].strftime('%H:%M')}"
+        )
+        botoes.append([InlineKeyboardButton(rotulo, callback_data=f"sugestao_{indice}")])
+
+    if tem_mais:
+        botoes.append([InlineKeyboardButton("🔄 Mais opções", callback_data="sugestao_mais")])
+
+    await query.edit_message_text(
+        "Escolha um dos horários sugeridos:",
+        reply_markup=InlineKeyboardMarkup(botoes)
+    )
+    return ESCOLHENDO_SUGESTAO
+
+
 async def escolher_modo_horario(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -407,29 +512,7 @@ async def escolher_modo_horario(update: Update, context: ContextTypes.DEFAULT_TY
     duracao_minutos = context.user_data.get("duracao_minutos")
 
     if query.data == "modo_sugerir":
-        janela_sugerida = sugerir_horario(duracao_minutos)
-
-        if janela_sugerida:
-            dia_sugerido = janela_sugerida["data"]
-            horario_sugerido = janela_sugerida["inicio"]
-            texto_sugestao = (
-                f"\n\nSugestão: {janela_sugerida['dia_semana']} "
-                f"({dia_sugerido.strftime('%d/%m')}) às {horario_sugerido.strftime('%H:%M')}"
-            )
-        else:
-            dia_sugerido = None
-            horario_sugerido = None
-            texto_sugestao = "\n\nNão encontrei uma janela livre nos próximos dias."
-
-        descricao, categoria, duracao_minutos = await salvar_tarefa(
-            context, dia_sugerido, horario_sugerido
-        )
-
-        await query.edit_message_text(
-            f"Tarefa salva: {descricao}\nCategoria: {categoria}\n"
-            f"Duração: {duracao_minutos} min{texto_sugestao}"
-        )
-        return ConversationHandler.END
+        return await montar_tela_sugestao(query, context, pagina=0)
 
     # query.data == "modo_escolher"
     dias_disponiveis = dias_com_janela_disponivel(duracao_minutos)
@@ -458,6 +541,32 @@ async def escolher_modo_horario(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=InlineKeyboardMarkup(botoes)
     )
     return ESCOLHENDO_DIA
+
+
+async def escolher_sugestao(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "sugestao_mais":
+        pagina_atual = context.user_data.get("pagina_sugestao", 0)
+        return await montar_tela_sugestao(query, context, pagina_atual + 1)
+
+    indice = int(query.data.removeprefix("sugestao_"))
+    opcoes = context.user_data.get("opcoes_sugestao", [])
+    opcao_escolhida = opcoes[indice]
+
+    descricao, categoria, duracao_minutos = await salvar_tarefa(
+        context, opcao_escolhida["data"], opcao_escolhida["horario"]
+    )
+
+    await query.edit_message_text(
+        f"Tarefa salva: {descricao}\nCategoria: {categoria}\n"
+        f"Duração: {duracao_minutos} min\n\n"
+        f"Agendada para {opcao_escolhida['dia_semana']} "
+        f"({opcao_escolhida['data'].strftime('%d/%m')}) às "
+        f"{opcao_escolhida['horario'].strftime('%H:%M')}"
+    )
+    return ConversationHandler.END
 
 
 async def escolher_dia(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -532,6 +641,7 @@ def main():
         states={
             AGUARDANDO_DURACAO: [CallbackQueryHandler(receber_duracao)],
             ESCOLHENDO_MODO_HORARIO: [CallbackQueryHandler(escolher_modo_horario)],
+            ESCOLHENDO_SUGESTAO: [CallbackQueryHandler(escolher_sugestao)],
             ESCOLHENDO_DIA: [CallbackQueryHandler(escolher_dia)],
             ESCOLHENDO_HORARIO: [CallbackQueryHandler(escolher_horario)],
         },
